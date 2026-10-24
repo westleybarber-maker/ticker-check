@@ -11,7 +11,11 @@ import streamlit as st
 import yfinance as yf
 from plotly.subplots import make_subplots
 
+import importlib
+
 import analysis as an
+
+importlib.reload(an)  # pick up analysis.py changes without a reboot
 
 st.set_page_config(page_title="Ticker Check", page_icon="📈", layout="wide")
 
