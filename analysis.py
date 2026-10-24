@@ -357,3 +357,39 @@ def scorecard(df, idx_df, supports, resistances, trend, idx_trend, days_to_earni
     score = sum(1 if s == "+" else -1 if s == "-" else 0 for s, _ in items)
     label = "Favourable" if score >= 3 else "Unfavourable" if score <= -3 else "Mixed"
     return label, score, items
+
+
+# ------------------------------------------------------- daily vs index
+def daily_comparison(stock, index, n):
+    """Day-by-day behaviour of the stock against the index over the last n trading days."""
+    s = stock["Close"].pct_change()
+    i = index["Close"].reindex(stock.index).ffill().pct_change()
+    s_atr = stock["ATR14"] / stock["Close"]
+    i_atr = (index["ATR14"] / index["Close"]).reindex(stock.index).ffill()
+    df = pd.DataFrame({"Stock": s, "Index": i, "Stock ATR%": s_atr, "Index ATR%": i_atr}).dropna(subset=["Stock", "Index"]).tail(n)
+    if df.empty:
+        return df, {}
+
+    up, down = df[df["Index"] > 0], df[df["Index"] < 0]
+    same = np.sign(df["Stock"]) == np.sign(df["Index"])
+    var = df["Index"].var()
+    stats = {
+        "days": len(df),
+        "same_direction": same.mean(),
+        "up_days": len(up),
+        "stock_up_when_index_up": (up["Stock"] > 0).mean() if len(up) else np.nan,
+        "avg_stock_on_up": up["Stock"].mean() if len(up) else np.nan,
+        "avg_index_on_up": up["Index"].mean() if len(up) else np.nan,
+        "down_days": len(down),
+        "stock_down_when_index_down": (down["Stock"] < 0).mean() if len(down) else np.nan,
+        "avg_stock_on_down": down["Stock"].mean() if len(down) else np.nan,
+        "avg_index_on_down": down["Index"].mean() if len(down) else np.nan,
+        "beta": df["Stock"].cov(df["Index"]) / var if var > 0 else np.nan,
+        "correlation": df["Stock"].corr(df["Index"]),
+        "stock_atr": df["Stock ATR%"].iloc[-1],
+        "index_atr": df["Index ATR%"].iloc[-1],
+        "stock_avg_abs": df["Stock"].abs().mean(),
+        "index_avg_abs": df["Index"].abs().mean(),
+    }
+    df["Same direction"] = same
+    return df, stats

@@ -157,6 +157,28 @@ def relative_chart(stock, index, n, ticker, idx_name):
     return fig
 
 
+def daily_bars_chart(df, ticker, idx_name, days=30):
+    d = df.tail(days)
+    fig = go.Figure()
+    fig.add_trace(go.Bar(x=d.index, y=d["Stock"], name=ticker,
+                         marker_color=[GREEN if v >= 0 else RED for v in d["Stock"]]))
+    fig.add_trace(go.Bar(x=d.index, y=d["Index"], name=idx_name, marker_color="#888"))
+    fig.update_layout(height=320, barmode="group", margin=dict(l=10, r=10, t=10, b=10),
+                      yaxis_tickformat="+.1%", hovermode="x unified", legend=dict(orientation="h", y=1.08, x=0))
+    fig.update_xaxes(rangebreaks=[dict(bounds=["sat", "mon"])])
+    return fig
+
+
+def atr_chart(df, ticker, idx_name):
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(x=df.index, y=df["Stock ATR%"], name=ticker, line=dict(width=2)))
+    fig.add_trace(go.Scatter(x=df.index, y=df["Index ATR%"], name=idx_name, line=dict(width=1.5, dash="dot")))
+    fig.update_layout(height=260, margin=dict(l=10, r=10, t=10, b=10), yaxis_tickformat=".1%",
+                      hovermode="x unified", legend=dict(orientation="h", y=1.1, x=0))
+    fig.update_xaxes(rangebreaks=[dict(bounds=["sat", "mon"])])
+    return fig
+
+
 # --------------------------------------------------------------- styling
 def _colour(v):
     if pd.isna(v) or v == 0:
@@ -319,5 +341,42 @@ else:
 st.subheader(f"Performance vs {idx_name}")
 if len(index):
     st.plotly_chart(relative_chart(stock, index, n, ticker, idx_name), use_container_width=True)
+
+# ---- daily vs index
+st.subheader(f"Day by day vs {idx_name}")
+if len(index):
+    daily, ds = an.daily_comparison(stock, index, n)
+    if ds:
+        st.caption(f"Over the last {ds['days']} trading days ({chart_range}).")
+        m1, m2, m3 = st.columns(3)
+        m1.metric("Same direction", f"{ds['same_direction']:.0%} of days")
+        m2.metric("Index up → stock up", f"{ds['stock_up_when_index_up']:.0%}",
+                  f"avg {ds['avg_stock_on_up']:+.2%} vs {ds['avg_index_on_up']:+.2%}", delta_color="off")
+        m3.metric("Index down → stock down", f"{ds['stock_down_when_index_down']:.0%}",
+                  f"avg {ds['avg_stock_on_down']:+.2%} vs {ds['avg_index_on_down']:+.2%}", delta_color="off")
+        m4, m5, m6 = st.columns(3)
+        ratio = ds["stock_atr"] / ds["index_atr"] if ds["index_atr"] else np.nan
+        m4.metric("Daily range (ATR)", f"{ds['stock_atr']:.1%} vs {ds['index_atr']:.1%}",
+                  f"moves ~{ratio:.1f}x the index", delta_color="off")
+        m5.metric("Beta", f"{ds['beta']:.2f}", "1.0 = moves with index", delta_color="off")
+        m6.metric("Correlation", f"{ds['correlation']:.2f}", "1.0 = always in step", delta_color="off")
+
+        st.markdown("**Last 30 days, daily % change**")
+        st.plotly_chart(daily_bars_chart(daily, ticker, idx_name), use_container_width=True)
+        st.markdown("**Daily range (ATR as % of price)**")
+        st.plotly_chart(atr_chart(daily, ticker, idx_name), use_container_width=True)
+
+        last10 = daily.tail(10).iloc[::-1].copy()
+        last10["Move vs index"] = (last10["Stock"] / last10["Index"]).where(last10["Index"].abs() > 0.0005)
+        tbl = pd.DataFrame({
+            ticker: last10["Stock"], idx_name: last10["Index"],
+            "Same way": last10["Same direction"].map({True: "✅", False: "❌"}),
+            "x index": last10["Move vs index"],
+        })
+        tbl.index = tbl.index.strftime("%a %d %b")
+        sty = tbl.style.format({ticker: "{:+.2%}", idx_name: "{:+.2%}", "x index": "{:.1f}x"}, na_rep="–")
+        st.dataframe(_map(sty, _colour, [ticker, idx_name]), use_container_width=True)
+        st.caption("Beta 1.5 means the stock has typically moved about 1.5% for every 1% the index moved. "
+                   "x index = that day's stock move divided by the index move (negative = opposite way).")
 
 st.caption("For information only. Not financial advice - decisions and risk are yours.")
