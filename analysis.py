@@ -393,3 +393,53 @@ def daily_comparison(stock, index, n):
     }
     df["Same direction"] = same
     return df, stats
+
+
+# ------------------------------------------------------------- gaps
+def open_gaps(df, lookback=504, min_frac=0.003):
+    """Price gaps (today's range doesn't overlap yesterday's) not yet fully filled.
+    Returns list of dicts: date, direction, low, high (remaining unfilled zone), distance."""
+    d = df.tail(lookback)
+    price = float(df["Close"].iloc[-1])
+    hi, lo = d["High"].to_numpy(), d["Low"].to_numpy()
+    out = []
+    for t in range(1, len(d)):
+        if lo[t] > hi[t - 1] * (1 + min_frac):            # gap up, fills if price comes back down
+            bottom = hi[t - 1]
+            top = lo[t:].min()                              # lowest point since shrinks the gap
+            if top > bottom:
+                out.append({"date": d.index[t], "direction": "Up", "low": bottom, "high": top})
+        elif hi[t] < lo[t - 1] * (1 - min_frac):          # gap down, fills if price goes back up
+            top = lo[t - 1]
+            bottom = hi[t:].max()
+            if top > bottom:
+                out.append({"date": d.index[t], "direction": "Down", "low": bottom, "high": top})
+    for g in out:
+        edge = g["high"] if g["high"] < price else g["low"] if g["low"] > price else price
+        g["distance"] = edge / price - 1
+    return sorted(out, key=lambda g: abs(g["distance"]))
+
+
+# ------------------------------------------------------- projection
+def projection(df, score, supports, resistances, gaps, horizon=21):
+    """Simple 1-month view: volatility range shifted by the scorecard lean."""
+    price = float(df["Close"].iloc[-1])
+    r = df["Close"].pct_change().dropna().tail(60)
+    sigma = float(r.std() * np.sqrt(horizon)) if len(r) > 10 else np.nan
+    tilt = float(np.clip(score / 8, -0.5, 0.5))
+    lean = "Up" if score >= 2 else "Down" if score <= -2 else "Neutral"
+    above = [g for g in gaps if g["low"] > price]
+    below = [g for g in gaps if g["high"] < price]
+    up_targets = [x for x in [resistances[0]["level"] if resistances else None,
+                              above[0]["low"] if above else None] if x]
+    down_targets = [x for x in [supports[0]["level"] if supports else None,
+                                below[0]["high"] if below else None] if x]
+    return {
+        "lean": lean,
+        "sigma": sigma,
+        "centre": price * (1 + tilt * sigma) if pd.notna(sigma) else np.nan,
+        "low": price * (1 + tilt * sigma - sigma) if pd.notna(sigma) else np.nan,
+        "high": price * (1 + tilt * sigma + sigma) if pd.notna(sigma) else np.nan,
+        "upside": min(up_targets) if up_targets else np.nan,
+        "downside": max(down_targets) if down_targets else np.nan,
+    }

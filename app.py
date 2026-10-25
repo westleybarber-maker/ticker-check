@@ -85,19 +85,31 @@ def load_earnings(symbol):
 def load_info(symbol):
     tk = yf.Ticker(symbol)
     name = currency = None
+    analyst = {}
     try:
         currency = tk.fast_info.get("currency")
     except Exception:
         pass
     try:
-        name = tk.info.get("shortName")
+        info = tk.info
+        name = info.get("shortName")
+        analyst = {"mean": info.get("targetMeanPrice"), "median": info.get("targetMedianPrice"),
+                   "high": info.get("targetHighPrice"), "low": info.get("targetLowPrice"),
+                   "count": info.get("numberOfAnalystOpinions"), "rating": info.get("recommendationKey")}
     except Exception:
         pass
-    return name, currency
+    try:
+        apt = tk.analyst_price_targets or {}
+        for k in ("mean", "median", "high", "low"):
+            if not analyst.get(k) and apt.get(k):
+                analyst[k] = apt[k]
+    except Exception:
+        pass
+    return name, currency, analyst
 
 
 # ---------------------------------------------------------------- charts
-def price_chart(d, supports, resistances, earn_dates):
+def price_chart(d, supports, resistances, earn_dates, gaps=()):
     fig = make_subplots(rows=4, cols=1, shared_xaxes=True, vertical_spacing=0.02,
                         row_heights=[0.55, 0.12, 0.15, 0.18])
     fig.add_trace(go.Candlestick(x=d.index, open=d["Open"], high=d["High"], low=d["Low"],
@@ -113,6 +125,10 @@ def price_chart(d, supports, resistances, earn_dates):
     for lv in resistances:
         fig.add_hline(y=lv["level"], line=dict(color=RED, width=1, dash="dash"), row=1, col=1,
                       annotation_text=f"R {lv['level']:,.2f}", annotation_position="top right")
+
+    for g in gaps:
+        fig.add_shape(type="rect", x0=max(g["date"], d.index[0]), x1=d.index[-1], y0=g["low"], y1=g["high"],
+                      fillcolor="#f4c542", opacity=0.18, line_width=0, row=1, col=1)
 
     ed = [x for x in earn_dates if d.index[0] <= x <= d.index[-1]]
     if ed:
@@ -207,11 +223,22 @@ st.sidebar.title("📈 Ticker Check")
 ticker = st.sidebar.text_input("Ticker", "AAPL", help="US: AAPL, NVDA. FTSE: add .L, e.g. VOD.L, BP.L").strip().upper()
 index_choice = st.sidebar.selectbox("Compare against", ["Auto"] + list(INDEXES))
 chart_range = st.sidebar.radio("Chart range", list(RANGES), index=1, horizontal=True)
+allow_zoom = st.sidebar.checkbox("Allow chart zoom / pan", value=False,
+                                 help="Off = charts don't move when you touch them (better on a phone)")
 try_premarket = st.sidebar.checkbox("Fetch real pre-market moves (US only, slower)", value=True)
 st.sidebar.caption("Data from Yahoo Finance via yfinance, refreshed every 15 minutes. Not financial advice.")
 
 if not ticker:
     st.stop()
+
+
+def show(fig):
+    if not allow_zoom:
+        fig.update_xaxes(fixedrange=True)
+        fig.update_yaxes(fixedrange=True)
+        fig.update_layout(dragmode=False)
+    st.plotly_chart(fig, use_container_width=True,
+                    config={"displayModeBar": allow_zoom, "scrollZoom": False, "doubleClick": False if not allow_zoom else "reset"})
 
 idx_sym = INDEXES[index_choice] if index_choice != "Auto" else ("^FTSE" if ticker.endswith(".L") else "^GSPC")
 idx_name = next(k for k, v in INDEXES.items() if v == idx_sym)
@@ -220,7 +247,7 @@ with st.spinner(f"Loading {ticker}..."):
     stock = load_daily(ticker)
     index = load_daily(idx_sym)
     earn = load_earnings(ticker)
-    name, currency = load_info(ticker)
+    name, currency, analyst = load_info(ticker)
 
 if stock.empty or len(stock) < 30:
     st.error(f"No price data found for **{ticker}**. Check the ticker - FTSE stocks need .L (e.g. VOD.L).")
@@ -229,6 +256,7 @@ if stock.empty or len(stock) < 30:
 stock = an.add_indicators(stock)
 index = an.add_indicators(index) if not index.empty else index
 supports, resistances = an.support_resistance(stock)
+gaps = an.open_gaps(stock)
 trend = an.trend_estimate(stock)
 idx_trend = an.trend_estimate(index) if len(index) > 30 else {k: {"label": "n/a", "confidence": 0, "reasons": []} for k in trend}
 
@@ -265,10 +293,65 @@ icons = {"+": "✅", "-": "❌", "!": "⚠️"}
 st.markdown("\n".join(f"- {icons[s]} {t}" for s, t in items) or "_No strong signals either way._")
 st.caption("A summary of the signals below to check against your own plan - not a prediction or advice.")
 
+# ---- price targets
+st.subheader("Price targets")
+price_now = float(last["Close"])
+proj = an.projection(stock, score, supports, resistances, gaps)
+
+
+def vs_now(x):
+    return f"{x / price_now - 1:+.1%}" if x and pd.notna(x) else "–"
+
+
+def fmt(x):
+    return f"{x:,.2f}" if x and pd.notna(x) else "–"
+
+
+pc1, pc2 = st.columns(2)
+lean_col = {"Up": GREEN, "Down": RED}.get(proj["lean"], "#e6a700")
+pc1.markdown(f"**Tool's 1-month view:** <span style='color:{lean_col};font-weight:600'>{proj['lean']}</span>",
+             unsafe_allow_html=True)
+pc1.markdown(f"Likely range: **{fmt(proj['low'])} – {fmt(proj['high'])}** "
+             f"({vs_now(proj['low'])} to {vs_now(proj['high'])}), centre {fmt(proj['centre'])}")
+pc1.caption("Range = typical 1-month move from recent volatility (holds roughly 2 times in 3), "
+            "shifted towards the Snapshot lean. Rough guide, not a forecast.")
+if analyst.get("mean"):
+    rating = (analyst.get("rating") or "").replace("_", " ").title()
+    pc2.markdown(f"**Analysts:** mean target **{fmt(analyst['mean'])}** ({vs_now(analyst['mean'])})")
+    pc2.markdown(f"Range {fmt(analyst.get('low'))} – {fmt(analyst.get('high'))}"
+                 + (f" · {analyst['count']} analysts" if analyst.get("count") else "")
+                 + (f" · consensus **{rating}**" if rating else ""))
+else:
+    pc2.markdown("**Analysts:** no target data on Yahoo for this ticker")
+
+rows = []
+if analyst.get("mean"):
+    rows += [("Analyst high", analyst.get("high")), ("Analyst mean", analyst.get("mean")),
+             ("Analyst median", analyst.get("median")), ("Analyst low", analyst.get("low"))]
+rows += [("Next resistance", resistances[0]["level"] if resistances else None),
+         ("Next support", supports[0]["level"] if supports else None),
+         ("52-week high", yr["High"].max()),
+         ("Tool upside target", proj["upside"]), ("Tool downside risk", proj["downside"])]
+tt = pd.DataFrame([{"Target": k, "Price": fmt(v), "vs now": vs_now(v)} for k, v in rows if v])
+st.dataframe(tt, hide_index=True, use_container_width=True)
+
+st.markdown("**Unfilled gaps** (shaded yellow on the chart)")
+if gaps:
+    gt = pd.DataFrame([{"Gap": "Up ▲" if g["direction"] == "Up" else "Down ▼",
+                        "Date": g["date"].strftime("%d %b %Y"),
+                        "Zone": f"{g['low']:,.2f} – {g['high']:,.2f}",
+                        "Distance": "price is inside" if g["low"] <= price_now <= g["high"] else f"{g['distance']:+.1%}",
+                        "Would fill if price": "falls" if g["low"] < price_now else "rises"}
+                       for g in gaps[:6]])
+    st.dataframe(gt, hide_index=True, use_container_width=True)
+    st.caption("Gaps often (not always) get filled later. Last 2 years, nearest first.")
+else:
+    st.caption("No unfilled gaps in the last 2 years.")
+
 # ---- chart
 st.subheader("Chart")
 n = RANGES[chart_range]
-st.plotly_chart(price_chart(stock.tail(n), supports, resistances, list(past_earn["date"])), use_container_width=True)
+show(price_chart(stock.tail(n), supports, resistances, list(past_earn["date"]), gaps))
 
 # ---- levels
 st.subheader("Support & resistance")
@@ -344,7 +427,7 @@ else:
 # ---- vs index
 st.subheader(f"Performance vs {idx_name}")
 if len(index):
-    st.plotly_chart(relative_chart(stock, index, n, ticker, idx_name), use_container_width=True)
+    show(relative_chart(stock, index, n, ticker, idx_name))
 
 # ---- daily vs index
 st.subheader(f"Day by day vs {idx_name}")
@@ -366,9 +449,9 @@ if len(index):
         m6.metric("Correlation", f"{ds['correlation']:.2f}", "1.0 = always in step", delta_color="off")
 
         st.markdown("**Last 30 days, daily % change**")
-        st.plotly_chart(daily_bars_chart(daily, ticker, idx_name), use_container_width=True)
+        show(daily_bars_chart(daily, ticker, idx_name))
         st.markdown("**Daily range (ATR as % of price)**")
-        st.plotly_chart(atr_chart(daily, ticker, idx_name), use_container_width=True)
+        show(atr_chart(daily, ticker, idx_name))
 
         last10 = daily.tail(10).iloc[::-1].copy()
         last10["Move vs index"] = (last10["Stock"] / last10["Index"]).where(last10["Index"].abs() > 0.0005)
